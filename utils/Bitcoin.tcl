@@ -37,12 +37,8 @@ set ::patterns {
 }
 
 proc vars args { foreach var $args { uplevel 1 [list variable $var] } }
-rename puts _puts; proc puts args { if {[catch { _puts {*}$args }]} then { exit } }
-proc autovars {} {
-   foreach rv [uplevel 1 {info locals &*}] {
-       upvar 1 $rv lv; uplevel 1 [list upvar 1 $lv [string range $rv 1 end]]
-   }
-}
+catch {rename puts _puts}
+proc puts args { if {[catch { _puts {*}$args }]} then { exit } }
 
 namespace eval Secp256k1 {
     # The prime:
@@ -399,7 +395,8 @@ namespace eval BitcoinStruct {
         
         binary scan $tx H* htx; return $htx
     }
-    proc readBlock {fd &block limit} { autovars
+    proc readBlock {fd &block limit} {
+        upvar 1 ${&block} block
         set block ""; set size 0; set bmagic [read $fd 4]
         if {$bmagic ne "\xF9\xBE\xB4\xD9"} { return 0 }
         set bsize [ read $fd 4]; binary scan $bsize "iu" size
@@ -536,6 +533,46 @@ namespace eval BitcoinScript {
     }
 }
 
+namespace eval Base32 {
+    variable B32 qpzry9x8gf2tvdw0s3jn54khce6mua7l
+
+    # convert a hex-string to base32
+    proc hex_to_b32 {hex} { seq_to_b32 [hex_to_seq $hex] }
+
+    proc hex_to_seq {hex} {
+        set num 0; set seq {}; set src 0
+        foreach x [split $hex {}] { scan $x %x x
+            set num [expr {($num<<4)+$x}]; incr src 4
+            if {$src>=5} {
+                lappend seq [expr {($num >> ($src-5)) & 0x1f}]
+                set num [expr {$num & 0x1ff}]; incr src -5
+            }
+        }; if {$src} { lappend seq [expr {($num<<(5-$src))&0x1f}] }
+        return $seq
+    }
+    proc seq_to_b32 {seq} {
+       variable B32; join [lmap v $seq { string index $B32 $v }] ""
+    }
+
+    # convert a base58-string to hex
+    proc b32_to_hex {b32} { seq_to_hex [b32_to_seq $b32] }
+
+    proc b32_to_seq {b32} {
+       variable B32; lmap v [split $b32 {}] { string first $v $B32 }
+    }
+    proc seq_to_hex {seq} {
+        set num 0; set hex {}; set src 0
+        foreach v $seq {
+            set num [expr {($num<<5)+$v}]; incr src 5
+            if {$src>=8} {
+                append hex [format %02x [expr {($num >> ($src-8)) & 0xff}]]
+                set num [expr {$num & 0xfff}]; incr src -8
+            }
+        }; # if {$src} { lappend seq [expr {($num<<(5-$src))&0x1f}] }
+        return $hex
+    }
+}
+
 namespace eval Base58 {
     variable B58 123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz
 
@@ -561,6 +598,80 @@ namespace eval Base58 {
     }
 }
 
+namespace eval BitCash {
+
+    proc sizecode {hex} {
+        set sizetab {40 0 48 1 56 2 64 3 80 4 96 5 112 6 128 7};# 160 - 512
+        set len [string length $hex]
+        if {[dict exists $sizetab $len]} {
+            return [dict get $sizetab $len]
+        } else { error "Invalid size." }
+    }
+
+    proc polymod {seq} {
+        set c 1; set gf32 {1 0x98f2bc8e61 2 0x79b76d99e2 4 0xf33e5fb3c4 8 0xae2eabe2a8 16 0x1e4f43e470}
+        foreach d $seq {
+            set c0 [expr { $c >> 35 }]
+            set c [expr { (($c & 0x07ffffffff) << 5) ^ $d}]
+            dict for {b v} $gf32 {
+               if {$c0 & $b} { set c [expr {$c ^ $v}] }
+            }
+            #puts "[format "%02x   %02x   %010llx"  $d $c0 $c]"
+        }
+        return [expr {$c ^ 1}]
+    }
+    proc prefix_expand {pref} {
+        set seq [ lmap ch [split $pref {}] { expr {[scan $ch %c] & 0x1f} } ]
+        return [ lappend seq 0 ]
+    }
+    proc create_checksum {pref data} {
+        set seq     [ prefix_expand $pref ]
+        lappend seq {*}$data
+        lappend seq {*}[lrepeat 8 0]
+
+        set polymod [ polymod $seq ]
+        lmap i {35 30 25 20 15 10 5 0} { expr {($polymod >> $i) & 0x1f} }
+    }
+    proc pack_addr_data {code hex} {
+        array set typetab {00 0 05 8}
+        set vbyte [expr {[sizecode $hex] + $typetab($code)}]
+        return [Base32::hex_to_seq "[format %02x $vbyte]${hex}" ]
+    }
+
+    proc encode {pref code hex} {
+        set seq [pack_addr_data $code $hex]
+        set checksum [create_checksum $pref $seq]
+        return ${pref}:[Base32::seq_to_b32 [concat $seq $checksum]]
+    }
+    proc decode {addr} {
+        set laddr [split $addr ":"]
+        if {[llength $laddr] < 2} {
+            set pref bitcoincash; set payl [lindex $laddr 0]
+        } else {
+            lassign $laddr pref payl
+        }
+        set lpref [prefix_expand $pref]; set data [Base32::b32_to_seq $payl]
+        set polymod [polymod [concat $lpref $data] ]
+        if {$polymod} { error "Checksum failure." }
+
+        set hex [Base32::seq_to_hex [lrange $data 0 end-8] ]
+        array set codetab {0 00 1 05}
+        set xtype [string range $hex 0 1]; set rest [string range $hex 2 end]
+        set dlen [sizecode $rest]; set type -1; scan $xtype %x type
+        if {$type >= 0} {
+            set elen [expr {$type & 0x7}]; set code $codetab([expr {$type >> 3}])
+            if {$elen!=$dlen} { error "Size mismatch" }
+        } else { set code "" }
+        return [list $code $rest ]
+    }
+
+    proc hex2wf {code xkey} {
+        encode "bitcoincash" $code $xkey
+    }
+    proc wf2hex {addr} {
+        decode $addr
+    }
+}
 namespace eval Bitcoin {
     package require sha256
     package require ripemd160
