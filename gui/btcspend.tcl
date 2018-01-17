@@ -10,6 +10,7 @@ catch { package require tooltip }
 wm title . BTC-Spend
 
 set this [info script]
+set btcexe bitcoin-cli
 
 set columns {
    "#" {-width 2  -align right -sortmode dictionary }
@@ -57,7 +58,7 @@ namespace eval Base58 {
 proc get_addresses {{minconf 0} {includeempty true}} {
    set res ""
    catch {
-      set json [ exec bitcoind listreceivedbyaddress $minconf $includeempty ]
+      set json [ exec $::btcexe listreceivedbyaddress $minconf $includeempty ]
       set res [ json::json2dict $json ]
    } msg
    return $res
@@ -67,7 +68,7 @@ proc get_unspent {{minconf 1} {maxconf 9999999} {adr "\[\]"}} {
    global data unconf confirmed; set res ""
    array unset data "*"; set unconf 0; set confirmed 0
    catch {
-      set json [ exec bitcoind listunspent $minconf $maxconf $adr ]
+      set json [ exec $::btcexe listunspent $minconf $maxconf $adr ]
       set res [ json::json2dict $json ]
    }
    foreach row $res {
@@ -180,6 +181,10 @@ proc updrow {tbl key enabled} {
    }
 }
 
+proc reset_click {} {
+   event generate . <5>; event generate . <ButtonRelease-5>
+}
+
 proc make_gui {f} {
    catch { destroy $f }; init_data; frame $f
 
@@ -284,7 +289,7 @@ proc make_outputs {f} {
 
    $tblo insert end {}
 
-   bind [$tblo bodypath] <Double-1> { remove_output %x,%y; event generate . <5> }
+   bind [$tblo bodypath] <Double-1> { remove_output %x,%y; reset_click }
    bind [$tblo bodypath] <Delete> { remove_output active }
    bind [$tblo bodypath] <Insert> { add_output ""}
 }
@@ -304,7 +309,7 @@ proc make_adresses {f} {
 
    $tbla sortbycolumnlist {"acc" "adr"} {dec inc}
 
-   bind [$tbla bodypath] <Double-1> { add_output %y; event generate . <5> }
+   bind [$tbla bodypath] <Double-1> { add_output %y; reset_click }
    bind [$tbla bodypath] <Key-Return> { add_output "active" }
 
    refresh_addrbook
@@ -450,15 +455,15 @@ proc create_transaction {} {
 
     $f.text insert end "Processing transaction...\n\n"
 
-    $f.text insert end "bitcoind createrawtransaction '$in' '$out'\n\n" 
+    $f.text insert end "$::btcexe createrawtransaction '$in' '$out'\n\n" 
     update idletasks
 
-    set res [catch { exec bitcoind createrawtransaction $in $out 2>@1 } result]
+    set res [catch { exec $::btcexe createrawtransaction $in $out 2>@1 } result]
     $f.text insert end "$result\n\n"
     if {$res} { $f.text insert end "Failed.\n"; return }
     update idletasks
 
-    set res [catch { exec bitcoind signrawtransaction $result 2>@1 } result]
+    set res [catch { exec $::btcexe signrawtransaction $result 2>@1 } result]
     $f.text insert end "$result\n\n"
     if {$res} { $f.text insert end "Failed.\n"; return }
     update idletasks
@@ -470,7 +475,7 @@ proc create_transaction {} {
     } then { $f.text insert end "Failed.\n"; return }
     set signedtx [dict get $txdict "hex"]
 
-    $f.text insert end "bitcoind sendrawtransaction '$signedtx'\n\n"
+    $f.text insert end "$::btcexe sendrawtransaction '$signedtx'\n\n"
         
     button $f.text.yes -text "Send" -command [list finish_tx $f $signedtx 1 ]
     button $f.text.no -text "Cancel" -command [list destroy $f ]
@@ -486,7 +491,7 @@ proc finish_tx {f tx send} {
     eval { destroy {*}[winfo children $f.text] }
     
     if {$send} {
-       set res [catch { exec bitcoind sendrawtransaction $tx 2>@1 } result]
+       set res [catch { exec $::btcexe sendrawtransaction $tx 2>@1 } result]
        $f.text insert end "$result\n\n"
        if {$res} { $f.text insert end "Failed.\n"; return }
        $f.text insert end "Done. "
@@ -548,7 +553,7 @@ proc toggle_selectable {tbl y} {
     if {$y ne ""} {; # determine item
        incr y [winfo y [$tbl bodypath]]
        set rownum [$tbl index @0,$y]
-       event generate . <5>
+       reset_click
     } else { set rownum [$tbl index active] }
     if {$rownum eq ""} { return }
     set flag [$tbl rowcget $rownum -selectable]
