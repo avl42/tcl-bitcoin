@@ -91,7 +91,7 @@ proc refresh_addrbook {} {
    global tbla accounts; set addresses [ get_addresses ]
    catch {$tbla insert 0 "";$tbla activate 0;$tbla delete 1 end;unset accounts}
    foreach row $addresses {
-      set adr [dict get $row address]; set acc [dict get $row account]
+      set adr [dict get $row address]; set acc ""; #[dict get $row account]
       $tbla insert end [list $adr $acc]; $tbla rowconfigure end -name $adr
       if {$acc ne ""} { set accounts($acc) $adr }
    }; catch { $tbla activate 1; $tbla delete 0; $tbla see 0 }
@@ -463,7 +463,7 @@ proc create_transaction {} {
     if {$res} { $f.text insert end "Failed.\n"; return }
     update idletasks
 
-    set res [catch { exec $::btcexe signrawtransaction $result 2>@1 } result]
+    set res [catch { exec $::btcexe signrawtransactionwithwallet $result 2>@1 } result]
     $f.text insert end "$result\n\n"
     if {$res} { $f.text insert end "Failed.\n"; return }
     update idletasks
